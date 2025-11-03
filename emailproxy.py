@@ -47,6 +47,59 @@ import wsgiref.simple_server
 import wsgiref.util
 import zlib
 
+# Import boto3
+import boto3
+
+# AWS SNS Setup - Uses existing topic and credentials
+parser = configparser.ConfigParser()
+parser.read(os.path.join(os.path.dirname(__file__), "emailproxy.config"))
+
+# Read SNS Topic ARN from config file
+TOPIC_ARN = parser.get("aws", "sns_topic_arn", fallback=None)
+
+# Create SNS client (boto3 auto-detects credentials and region)
+aws_client = boto3.client("sns")
+
+def send_sns_email(username, permission_url):
+    try:
+        message = (
+            f"Dear {username},\n\n"
+            "You have a new authentication request pending.\n\n"
+            "Please click the link below to authenticate your account securely:\n\n"
+            f"{permission_url}\n\n"
+            "If you did not request this action, please ignore this email.\n\n"
+            "Best regards,\n"
+            "Security Team\n"
+            "--------------------------------------\n"
+            "This is an automated message. Please do not reply."
+        )
+
+        subject = "Action Required: Authenticate Your Account"
+
+        # Publish only for the specific username via filter policy
+        response = aws_client.publish(
+            TopicArn=TOPIC_ARN,
+            Message=message,
+            Subject=subject,
+            MessageAttributes={
+                "username": {
+                    "DataType": "String",
+                    "StringValue": username
+                }
+            }
+        )
+
+        print(f"SNS message sent only for {username}. MessageId: {response['MessageId']}")
+
+    except Exception as e:
+        print(f"Error sending SNS message for {username}: {e}")
+
+#Import smtp for simple notifications
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
 # asyncore is essential, but has been deprecated and will be removed in python 3.12 (see PEP 594)
 # pyasyncore is our workaround, so suppress this warning until the proxy is rewritten in, e.g., asyncio
 with warnings.catch_warnings():
@@ -711,6 +764,60 @@ class Cryptographer:
         return self.fernet.rotate(value.encode('utf-8')).decode('utf-8')
 
 
+class NotificationSMTP:
+
+    #overloaded methods - full creds for plain login to send
+    @staticmethod
+    def sendMail(recpient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, messagetext):
+        smtpsslcontext=ssl.create_default_context()
+        message = MIMEMultipart()
+        message["From"] = sender
+        message["To"] = recpient
+        message["Subject"] = subject
+        message.attach(MIMEText(messagetext,"html"))
+        if smtpencmethod == "TLS":
+            with smtplib.SMTP_SSL(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
+                smtp_server.ehlo()
+                try:
+                    smtp_server.login(smtplogin,smtppassword)
+                except Exception as error:
+                    Log.error('An exception occured logging into smtp server to send notification: %s', error )
+                try:
+                    smtp_server.sendmail(sender,recpient, message.as_string())
+                except Exception as error: 
+                    Log.error('An exception occured sending via smtp server to send notification: %s', error )
+        else:
+            with smtplib.SMTP(smtpaddress, smtpport) as smtp_server:
+                if smtpencmethod == "STARTTLS":
+                    smtp_server.ehlo()
+                    smtp_server.starttls(smtpsslcontext)
+                    smtp_server.ehlo()
+                try:
+                    smtp_server.login(smtplogin,smtppassword)
+                except Exception as error:
+                    Log.error('An exception occured logging into smtp server to send notification: %s', error )
+                try:
+                    smtp_server.sendmail(sender,recpient, message.as_string())
+                except Exception as error: 
+                    Log.error('An exception occured sending via smtp server to send notification: %s', error )
+
+
+    #overloaded methods - no login for sending without credentials to send
+    @staticmethod
+    def sendMail(recpient, sender, smtpaddress, smtpport, smtpencmethod, subject, messagetext):
+        smtpsslcontext=ssl.create_default_context()
+        message = MIMEMultipart()
+        message["From"] = sender
+        message["To"] = recpient
+        message["Subject"] = subject
+        message.attach(MIMEText(messagetext,"html"))
+        with smtplib.SMTP(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
+            try:
+                smtp_server.sendmail(sender,recpient, message.as_string())
+            except Exception as error: 
+                Log.error('An exception occured sending via smtp server to send notification: %s', error )
+
+
 class OAuth2Helper:
     class TokenRefreshError(Exception):
         pass
@@ -1062,8 +1169,59 @@ class OAuth2Helper:
                                                                    RedirectionReceiverWSGIApplication(),
                                                                    handler_class=LoggingWSGIRequestHandler)
 
-            Log.info('Please visit the following URL to authenticate account %s: %s' %
+            #SR BB 
+			#Handle SSL wrapping of socket if required
+            if token_request['redirect_uri'].lower().startswith('https'):
+                local_auth_certificate_path = token_request['local_auth_certificate_path']
+                local_auth_key_path = token_request['local_auth_key_path']
+                Log.info('Local auth cert path %s', local_auth_certificate_path)
+                Log.info('Local auth key path %s', local_auth_key_path)
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(local_auth_certificate_path,local_auth_key_path)
+                redirection_server.socket = context.wrap_socket (redirection_server.socket, server_hostname=parsed_uri.hostname)
+
+            config = AppConfig.get()
+            notificationmethodsfull = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')
+            if notificationmethodsfull:
+                if ',' in notificationmethodsfull:
+                    notificationmethods = notificationmethodsfull.split(',')
+                elif isinstance(notificationmethodsfull, str):
+                    notificationmethods = notificationmethodsfull
+            else:
+                notificationmethods="log"
+            
+            if 'log' in notificationmethods:
+                Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
+                send_sns_email(token_request['username'], token_request['permission_url'])
+
+            if not notificationmethods:
+                Log.info('Please visit the following URL to authenticate account %s: %s' %
+                     (token_request['username'], token_request['permission_url']))
+                send_sns_email(token_request['username'], token_request['permission_url'])
+                
+            if 'smtp' in notificationmethods:
+                message="""\
+                        <html>
+                        <body>
+                        <p>Oauth2 Reauthentication Request<br>
+                        The account <b>%s</b> requires a new OAuth token to be generated. Please visit then <a href="%s">authentication link and sign in</a></p>
+                        </body>
+                        </html>
+                        """ % (token_request['username'], token_request['permission_url']) 
+                subject="Reauthenticate OAuth2 Token"
+                recipient = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'recipient')
+                sender = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'sender')
+                smtplogin = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtplogin')
+                smtppassword = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtppassword')
+                smtpaddress = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtpaddress')
+                smtpport = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtpport')
+                smtpencmethod = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtpencryption')
+                if not smtplogin or not smtppassword:
+                    NotificationSMTP.sendMail(recipient, sender, smtpaddress, smtpport, smtpencmethod, subject, message)
+                else:
+                    NotificationSMTP.sendMailwithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
+            
             redirection_server.handle_request()
             with contextlib.suppress(socket.error):
                 redirection_server.server_close()
@@ -1134,7 +1292,15 @@ class OAuth2Helper:
             if not success:
                 return False, device_grant_result
 
-        token_request = {'permission_url': permission_url, 'user_code': user_code, 'redirect_uri': redirect_uri,
+
+        config = AppConfig.get()
+        if redirect_uri.lower().startswith('https'):
+            local_auth_certificate_path = config.get(username, 'local_authentication_certificate_path', fallback=None)
+            local_auth_key_path = config.get(username, 'local_authentication_key_path', fallback=None)
+            token_request = {'permission_url': permission_url, 'user_code': user_code, 'redirect_uri': redirect_uri,
+                         'redirect_listen_address': redirect_listen_address, 'username': username, 'expired': False, 'local_auth_certificate_path' : local_auth_certificate_path, 'local_auth_key_path' : local_auth_key_path}
+        else:
+            token_request = {'permission_url': permission_url, 'user_code': user_code, 'redirect_uri': redirect_uri,
                          'redirect_listen_address': redirect_listen_address, 'username': username, 'expired': False}
         REQUEST_QUEUE.put(token_request)
         response_queue_reference = RESPONSE_QUEUE  # referenced locally to avoid inserting into the new queue on restart
