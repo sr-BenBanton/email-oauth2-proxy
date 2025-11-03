@@ -1134,8 +1134,15 @@ class OAuth2Helper:
                 redirection_server.socket = context.wrap_socket (redirection_server.socket, server_hostname=parsed_uri.hostname)
 
             config = AppConfig.get()
-            notificationmethods = (AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')).split(',')
-
+            notificationmethodsfull = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')
+            if notificationmethodsfull:
+                if ',' in notificationmethodsfull:
+                    notificationmethods = notificationmethodsfull.split(',')
+                elif isinstance(notificationmethodsfull, str):
+                    notificationmethods = notificationmethodsfull
+            else:
+                notificationmethods="log"
+            
             if 'log' in notificationmethods:
                 Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
@@ -1165,9 +1172,7 @@ class OAuth2Helper:
                     NotificationSMTP.sendMail(recipient, sender, smtpaddress, smtpport, smtpencmethod, subject, message)
                 else:
                     NotificationSMTP.sendMailwithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
-
-
-                
+            
             redirection_server.handle_request()
             with contextlib.suppress(socket.error):
                 redirection_server.server_close()
