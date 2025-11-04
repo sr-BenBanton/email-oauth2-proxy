@@ -47,6 +47,12 @@ import wsgiref.simple_server
 import wsgiref.util
 import zlib
 
+#Import smtp for simple notifications
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
 # asyncore is essential, but has been deprecated and will be removed in python 3.12 (see PEP 594)
 # pyasyncore is our workaround, so suppress this warning until the proxy is rewritten in, e.g., asyncio
 with warnings.catch_warnings():
@@ -711,6 +717,72 @@ class Cryptographer:
         return self.fernet.rotate(value.encode('utf-8')).decode('utf-8')
 
 
+class NotificationSMTP:
+
+    #overloaded methods - full creds for plain login to send
+    @staticmethod
+    def sendMailWithLogin(recpient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, messagetext):
+        smtpsslcontext=ssl.create_default_context()
+        message = MIMEMultipart()
+        message["From"] = sender
+        message["To"] = recpient
+        message["Subject"] = subject
+        message.attach(MIMEText(messagetext,"html"))
+        if ',' in recpient:
+            toaddrval = recpient.split(',')
+        elif ';' in recpient:
+            toaddrval = recpient.split(';')
+        else:
+            toaddrval = recpient
+        if smtpencmethod == "TLS":
+            with smtplib.SMTP_SSL(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
+                smtp_server.ehlo()
+                try:
+                    smtp_server.login(smtplogin,smtppassword)
+                except Exception as error:
+                    Log.error('An exception occured logging into smtp server to send notification: %s', error )
+                try:
+                    smtp_server.sendmail(sender,toaddrval, message.as_string())
+                except Exception as error: 
+                    Log.error('An exception occured sending via smtp server to send notification: %s', error )
+        else:
+            with smtplib.SMTP(smtpaddress, smtpport) as smtp_server:
+                if smtpencmethod == "STARTTLS":
+                    smtp_server.ehlo()
+                    smtp_server.starttls(smtpsslcontext)
+                    smtp_server.ehlo()
+                try:
+                    smtp_server.login(smtplogin,smtppassword)
+                except Exception as error:
+                    Log.error('An exception occured logging into smtp server to send notification: %s', error )
+                try:
+                    smtp_server.sendmail(sender,toaddrval, message.as_string())
+                except Exception as error: 
+                    Log.error('An exception occured sending via smtp server to send notification: %s', error )
+
+
+    #overloaded methods - no login for sending without credentials to send
+    @staticmethod
+    def sendMail(recpient, sender, smtpaddress, smtpport, smtpencmethod, subject, messagetext):
+        smtpsslcontext=ssl.create_default_context()
+        message = MIMEMultipart()
+        message["From"] = sender
+        message["To"] = recpient
+        message["Subject"] = subject
+        message.attach(MIMEText(messagetext,"html"))
+        if ',' in recpient:
+            toaddrval = recpient.split(',')
+        elif ';' in recpient:
+            toaddrval = recpient.split(';')
+        else:
+            toaddrval = recpient
+        with smtplib.SMTP(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
+            try:
+                smtp_server.sendmail(sender,toaddrval, message.as_string())
+            except Exception as error: 
+                Log.error('An exception occured sending via smtp server to send notification: %s', error )
+
+
 class OAuth2Helper:
     class TokenRefreshError(Exception):
         pass
@@ -1073,8 +1145,46 @@ class OAuth2Helper:
                 context.load_cert_chain(local_auth_certificate_path,local_auth_key_path)
                 redirection_server.socket = context.wrap_socket (redirection_server.socket, server_hostname=parsed_uri.hostname)
 
-            Log.info('Please visit the following URL to authenticate account %s: %s' %
+            config = AppConfig.get()
+            notificationmethodsfull = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')
+            if notificationmethodsfull:
+                if ',' in notificationmethodsfull:
+                    notificationmethods = notificationmethodsfull.split(',')
+                elif isinstance(notificationmethodsfull, str):
+                    notificationmethods = notificationmethodsfull
+            else:
+                notificationmethods="log"
+            
+            if 'log' in notificationmethods:
+                Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
+
+            if not notificationmethods:
+                Log.info('Please visit the following URL to authenticate account %s: %s' %
+                     (token_request['username'], token_request['permission_url']))
+                
+            if 'smtp' in notificationmethods:
+                message="""\
+                        <html>
+                        <body>
+                        <p>Oauth2 Reauthentication Request<br>
+                        The account <b>%s</b> requires a new OAuth token to be generated. Please visit then <a href="%s">authentication link and sign in</a></p>
+                        </body>
+                        </html>
+                        """ % (token_request['username'], token_request['permission_url']) 
+                subject="Reauthenticate OAuth2 Token"
+                recipient = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'recipient')
+                sender = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'sender')
+                smtplogin = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtplogin')
+                smtppassword = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtppassword')
+                smtpaddress = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtpaddress')
+                smtpport = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtpport')
+                smtpencmethod = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'smtpencryption')
+                if not smtplogin or not smtppassword:
+                    NotificationSMTP.sendMail(recipient, sender, smtpaddress, smtpport, smtpencmethod, subject, message)
+                else:
+                    NotificationSMTP.sendMailWithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
+            
             redirection_server.handle_request()
             with contextlib.suppress(socket.error):
                 redirection_server.server_close()
