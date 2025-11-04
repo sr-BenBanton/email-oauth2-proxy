@@ -721,13 +721,19 @@ class NotificationSMTP:
 
     #overloaded methods - full creds for plain login to send
     @staticmethod
-    def sendMail(recpient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, messagetext):
+    def sendMailWithLogin(recpient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, messagetext):
         smtpsslcontext=ssl.create_default_context()
         message = MIMEMultipart()
         message["From"] = sender
         message["To"] = recpient
         message["Subject"] = subject
         message.attach(MIMEText(messagetext,"html"))
+        if ',' in recpient:
+            toaddrval = recpient.split(',')
+        elif ';' in recpient:
+            toaddrval = recpient.split(';')
+        else:
+            toaddrval = recpient
         if smtpencmethod == "TLS":
             with smtplib.SMTP_SSL(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
                 smtp_server.ehlo()
@@ -736,7 +742,7 @@ class NotificationSMTP:
                 except Exception as error:
                     Log.error('An exception occured logging into smtp server to send notification: %s', error )
                 try:
-                    smtp_server.sendmail(sender,recpient, message.as_string())
+                    smtp_server.sendmail(sender,toaddrval, message.as_string())
                 except Exception as error: 
                     Log.error('An exception occured sending via smtp server to send notification: %s', error )
         else:
@@ -750,7 +756,7 @@ class NotificationSMTP:
                 except Exception as error:
                     Log.error('An exception occured logging into smtp server to send notification: %s', error )
                 try:
-                    smtp_server.sendmail(sender,recpient, message.as_string())
+                    smtp_server.sendmail(sender,toaddrval, message.as_string())
                 except Exception as error: 
                     Log.error('An exception occured sending via smtp server to send notification: %s', error )
 
@@ -764,9 +770,15 @@ class NotificationSMTP:
         message["To"] = recpient
         message["Subject"] = subject
         message.attach(MIMEText(messagetext,"html"))
+        if ',' in recpient:
+            toaddrval = recpient.split(',')
+        elif ';' in recpient:
+            toaddrval = recpient.split(';')
+        else:
+            toaddrval = recpient
         with smtplib.SMTP(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
             try:
-                smtp_server.sendmail(sender,recpient, message.as_string())
+                smtp_server.sendmail(sender,toaddrval, message.as_string())
             except Exception as error: 
                 Log.error('An exception occured sending via smtp server to send notification: %s', error )
 
@@ -1171,7 +1183,7 @@ class OAuth2Helper:
                 if not smtplogin or not smtppassword:
                     NotificationSMTP.sendMail(recipient, sender, smtpaddress, smtpport, smtpencmethod, subject, message)
                 else:
-                    NotificationSMTP.sendMailwithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
+                    NotificationSMTP.sendMailWithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
             
             redirection_server.handle_request()
             with contextlib.suppress(socket.error):
